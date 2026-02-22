@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+*.db
+
+# Бэкапы
+backups/
+*.sql
+
+# Логи
+*.log
+
+# Локальные файлы
+.DS_Store
+thumb/
+templates/__pycache__/
