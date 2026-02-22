@@ -1,0 +1,28 @@
+# Telegram Bot
+python-telegram-bot==20.7
+
+# База данных
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.12.1
+
+# Изображения и QR
+pillow==10.1.0
+qrcode[pil]==7.4.2
+
+# HTTP запросы
+requests==2.31.0
+fake-useragent==1.4.0
+beautifulsoup4==4.12.2
+aiohttp==3.9.1
+
+# Веб-сервер для редиректов
+flask==3.0.0
+flask-sqlalchemy==3.1.1
+gunicorn==21.2.0
+
+# Утилиты
+python-dotenv==1.0.0
+aiofiles==23.2.1
+schedule==1.2.0
+cryptography==41.0.7
