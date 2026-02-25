@@ -2,117 +2,152 @@
 # -*- coding: utf-8 -*-
 
 """
-Sylvia Bot - Главный файл запуска
-Конструктор визиток для селлеров Wildberries и Ozon
+Sylvia Bot - адаптированная версия для Render (webhook)
 """
 
+import os
 import logging
-import asyncio
+from flask import Flask, request
+from telegram import Update, Bot
 from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    CallbackQueryHandler, 
-    MessageHandler, 
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
     filters,
     PreCheckoutQueryHandler
 )
 
-from bot.config import BOT_TOKEN, LOG_LEVEL
-from bot.database.db import init_db
-from bot.handlers import (
-    start, order, payment, referral, profile, admin
-)
-from bot.services.backup import start_backup_scheduler
-from bot.services.proxy_rotator import ProxyRotator
-
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=getattr(logging, LOG_LEVEL)
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-async def error_handler(update, context):
-    """Глобальный обработчик ошибок"""
-    logger.error(f"Ошибка: {context.error}")
-    
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "❌ Произошла внутренняя ошибка. Администратор уже уведомлен."
-        )
+# Инициализация Flask
+app = Flask(__name__)
 
-def main():
-    """Основная функция запуска бота"""
-    logger.info("Запуск Sylvia Bot...")
+# Токен бота из переменных окружения
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не установлен")
+
+# Создаём приложение Telegram Bot без Updater
+telegram_app = Application.builder().token(TOKEN).updater(None).build()
+
+# URL для вебхука (Render подставит автоматически)
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
+if not RENDER_URL:
+    logger.warning("RENDER_EXTERNAL_URL не установлен, используется localhost для теста")
+    RENDER_URL = "http://localhost:5000"
+
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
+
+# ========== ИМПОРТЫ ОБРАБОТЧИКОВ ==========
+# Здесь импортируем твои существующие обработчики
+from bot.handlers import start, order, payment, referral, profile, admin
+from bot.database.db import init_db
+
+# ========== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ==========
+def register_handlers():
+    """Регистрация всех обработчиков команд"""
     
-    # Инициализация базы данных
+    # Базовые команды
+    telegram_app.add_handler(CommandHandler("start", start.start))
+    telegram_app.add_handler(CommandHandler("help", start.help_command))
+    
+    # Создание визитки
+    telegram_app.add_handler(CommandHandler("new", order.new_card))
+    telegram_app.add_handler(CallbackQueryHandler(order.handle_template_choice, pattern="^template_"))
+    telegram_app.add_handler(CallbackQueryHandler(order.handle_qr_type, pattern="^qr_type_"))
+    
+    # Профиль и статистика
+    telegram_app.add_handler(CommandHandler("profile", profile.show_profile))
+    telegram_app.add_handler(CommandHandler("stats", profile.show_stats))
+    
+    # Реферальная программа
+    telegram_app.add_handler(CommandHandler("referral", referral.show_referral))
+    telegram_app.add_handler(CommandHandler("balance", referral.show_balance))
+    
+    # Платежи
+    telegram_app.add_handler(CommandHandler("buy", payment.buy))
+    telegram_app.add_handler(PreCheckoutQueryHandler(payment.pre_checkout_handler))
+    telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment.successful_payment_handler))
+    
+    # Админка
+    telegram_app.add_handler(CommandHandler("admin", admin.admin_panel))
+    telegram_app.add_handler(CallbackQueryHandler(admin.handle_admin_callback, pattern="^admin_"))
+    
+    # Текстовые сообщения (для ввода артикулов и т.д.)
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, order.handle_text_input))
+    
+    logger.info("Обработчики зарегистрированы")
+
+# ========== FLASK ЭНДПОИНТЫ ==========
+@app.route("/health", methods=["GET"])
+def health():
+    """Проверка здоровья для Render"""
+    return "OK", 200
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    """Приём обновлений от Telegram"""
+    try:
+        # Получаем обновление от Telegram
+        update_data = request.get_json(force=True)
+        update = Update.de_json(update_data, telegram_app.bot)
+        
+        # Отправляем в очередь обработки
+        telegram_app.update_queue.put(update)
+        
+        logger.debug(f"Получено обновление: {update.update_id}")
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Ошибка обработки вебхука: {e}")
+        return "Internal Server Error", 500
+
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook():
+    """Ручная установка вебхука (для отладки)"""
+    try:
+        bot = Bot(token=TOKEN)
+        bot.set_webhook(url=WEBHOOK_URL)
+        return f"Webhook установлен на {WEBHOOK_URL}", 200
+    except Exception as e:
+        return f"Ошибка: {e}", 500
+
+# ========== ЗАПУСК ==========
+def main():
+    """Точка входа"""
+    logger.info("Запуск Sylvia Bot на Render...")
+    
+    # Инициализация БД
     init_db()
     logger.info("База данных инициализирована")
     
-    # Запуск планировщика бэкапов
-    start_backup_scheduler()
-    logger.info("Планировщик бэкапов запущен")
+    # Регистрируем обработчики
+    register_handlers()
     
-    # Инициализация ротатора прокси
-    proxy_rotator = ProxyRotator()
-    asyncio.get_event_loop().run_until_complete(proxy_rotator.update_proxies())
-    logger.info("Ротатор прокси инициализирован")
+    # Сохраняем REDIRECT_URL в данных бота (для QR-кодов)
+    telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
     
-    # Создание приложения бота
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Устанавливаем вебхук
+    try:
+        telegram_app.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Вебхук установлен: {WEBHOOK_URL}")
+        
+        # Получаем информацию о вебхуке для проверки
+        webhook_info = telegram_app.bot.get_webhook_info()
+        logger.info(f"Информация о вебхуке: {webhook_info}")
+    except Exception as e:
+        logger.error(f"Ошибка установки вебхука: {e}")
     
-    # Сохраняем ротатор прокси в данных бота
-    application.bot_data['proxy_rotator'] = proxy_rotator
-    application.bot_data['REDIRECT_URL'] = None  # Будет установлено из config
-    
-    # Регистрация обработчиков
-    register_handlers(application)
-    
-    # Глобальный обработчик ошибок
-    application.add_error_handler(error_handler)
-    
-    logger.info("Бот готов к работе")
-    
-    # Запуск бота
-    application.run_polling()
+    # Запускаем Flask приложение
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Запуск Flask на порту {port}")
+    app.run(host="0.0.0.0", port=port)
 
-def register_handlers(application):
-    """Регистрация всех обработчиков"""
-    
-    # Базовые команды
-    application.add_handler(CommandHandler("start", start.start))
-    application.add_handler(CommandHandler("help", start.help_command))
-    
-    # Создание визитки
-    application.add_handler(CommandHandler("new", order.new_card))
-    application.add_handler(CallbackQueryHandler(order.handle_template_choice, pattern="^template_"))
-    application.add_handler(CallbackQueryHandler(order.handle_qr_type, pattern="^qr_type_"))
-    application.add_handler(CallbackQueryHandler(order.handle_favorite_choice, pattern="^(save_favorite|continue_without_save)$"))
-    
-    # Профиль и статистика
-    application.add_handler(CommandHandler("profile", profile.show_profile))
-    application.add_handler(CommandHandler("stats", profile.show_stats))
-    application.add_handler(CallbackQueryHandler(profile.handle_stats_period, pattern="^stats_"))
-    
-    # Реферальная программа
-    application.add_handler(CommandHandler("referral", referral.show_referral))
-    application.add_handler(CommandHandler("balance", referral.show_balance))
-    application.add_handler(CallbackQueryHandler(referral.handle_referral, pattern="^ref_"))
-    
-    # Платежи
-    application.add_handler(CommandHandler("buy", payment.buy))
-    application.add_handler(CallbackQueryHandler(payment.handle_payment, pattern="^buy_"))
-    application.add_handler(PreCheckoutQueryHandler(payment.pre_checkout_handler))
-    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment.successful_payment_handler))
-    
-    # Админка
-    application.add_handler(CommandHandler("admin", admin.admin_panel))
-    application.add_handler(CallbackQueryHandler(admin.handle_admin_callback, pattern="^admin_"))
-    
-    # Обработчики текста (ввод артикулов и т.д.)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, order.handle_text_input))
-    
-    logger.info(f"Зарегистрировано обработчиков: {len(application.handlers)}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
