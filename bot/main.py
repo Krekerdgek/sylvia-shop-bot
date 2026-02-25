@@ -27,27 +27,47 @@ if not TOKEN:
 RENDER_URL = os.environ.get("RENDER_URL", "https://sylvia-shop-bot.onrender.com")
 WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
-# Инициализация бота
-telegram_app = Application.builder().token(TOKEN).build()
+# Инициализация бота (глобально)
+telegram_app = None
+
+# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
+def init_bot():
+    """Создает и настраивает экземпляр бота"""
+    global telegram_app
+    telegram_app = Application.builder().token(TOKEN).build()
+    register_handlers()
+    return telegram_app
 
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Принимает обновления от Telegram"""
+def webhook():
+    """Принимает обновления от Telegram (синхронная обертка)"""
     if request.method == 'POST':
         try:
-            # Получаем обновление от Telegram
-            update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+            # Получаем JSON из запроса
+            update_data = request.get_json(force=True)
+            logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
             
-            # Передаем обновление в диспетчер бота
-            await telegram_app.process_update(update)
+            # Создаем задачу для асинхронной обработки
+            asyncio.run_coroutine_threadsafe(
+                process_update_async(update_data),
+                asyncio.get_event_loop()
+            )
             
-            logger.info(f"✅ Получено обновление: {update.update_id}")
             return 'OK', 200
         except Exception as e:
-            logger.error(f"❌ Ошибка обработки вебхука: {e}")
+            logger.error(f"❌ Ошибка в webhook: {e}", exc_info=True)
             return 'Error', 500
     return 'Method not allowed', 405
+
+async def process_update_async(update_data):
+    """Асинхронная обработка обновления"""
+    try:
+        update = Update.de_json(update_data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        logger.info(f"✅ Обновление {update.update_id} обработано")
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки обновления: {e}", exc_info=True)
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -57,6 +77,13 @@ def health():
 @app.route('/', methods=['GET'])
 def index():
     return 'Sylvia Bot is running!', 200
+
+@app.route('/test', methods=['GET', 'POST'])
+def test():
+    """Тестовый эндпоинт"""
+    if request.method == 'POST':
+        return f"POST received: {request.get_json()}", 200
+    return "GET received", 200
 
 # ========== Регистрация обработчиков ==========
 def register_handlers():
@@ -98,13 +125,15 @@ def register_handlers():
 async def setup_webhook():
     """Устанавливает вебхук"""
     try:
-        # Инициализируем приложение
-        await telegram_app.initialize()
+        # Удаляем старый вебхук
+        await telegram_app.bot.delete_webhook()
+        logger.info("✅ Старый вебхук удален")
         
-        # Устанавливаем вебхук
+        # Устанавливаем новый вебхук
         await telegram_app.bot.set_webhook(
             url=WEBHOOK_URL,
-            allowed_updates=['message', 'callback_query', 'successful_payment']
+            allowed_updates=['message', 'callback_query', 'successful_payment'],
+            max_connections=40
         )
         logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
         
@@ -126,25 +155,28 @@ def main():
     logger.info("🚀 Запуск Sylvia Bot на Render...")
     
     try:
-        # Регистрируем обработчики
-        register_handlers()
+        # Инициализируем бота
+        init_bot()
+        logger.info("✅ Бот инициализирован")
         
-        # Создаем новый цикл событий
+        # Создаем и запускаем цикл событий в отдельном потоке
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Устанавливаем вебхук
+        # Запускаем бота в фоне
         loop.run_until_complete(setup_webhook())
         
-        # Запускаем Flask
+        # Запускаем Flask в основном потоке
         port = int(os.environ.get("PORT", 5000))
         logger.info(f"🌐 Запуск Flask на порту {port}")
-        app.run(host="0.0.0.0", port=port, threaded=True)
+        
+        # Запускаем Flask с поддержкой асинхронности
+        app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
         
     except KeyboardInterrupt:
         logger.info("👋 Бот остановлен")
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
+        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
         raise e
     finally:
         if 'loop' in locals():
