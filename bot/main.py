@@ -1,22 +1,13 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Sylvia Bot - адаптированная версия для Render (webhook)
-"""
-
 import os
 import logging
+import asyncio
 from flask import Flask, request
-from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    PreCheckoutQueryHandler
-)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -28,126 +19,136 @@ logger = logging.getLogger(__name__)
 # Инициализация Flask
 app = Flask(__name__)
 
-# Токен бота из переменных окружения
+# Токен и URL
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("BOT_TOKEN не установлен")
+    raise ValueError("BOT_TOKEN не установлен в переменных окружения!")
 
-# Создаём приложение Telegram Bot без Updater
-telegram_app = Application.builder().token(TOKEN).updater(None).build()
+RENDER_URL = os.environ.get("RENDER_URL", "https://sylvia-shop-bot.onrender.com")
+WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
-# URL для вебхука (Render подставит автоматически)
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
-if not RENDER_URL:
-    logger.warning("RENDER_EXTERNAL_URL не установлен, используется localhost для теста")
-    RENDER_URL = "http://localhost:5000"
+# Инициализация бота
+telegram_app = Application.builder().token(TOKEN).build()
 
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
+# ========== Flask Routes ==========
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Принимает обновления от Telegram"""
+    if request.method == 'POST':
+        try:
+            # Получаем обновление от Telegram
+            update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+            
+            # Передаем обновление в диспетчер бота
+            await telegram_app.process_update(update)
+            
+            logger.info(f"✅ Получено обновление: {update.update_id}")
+            return 'OK', 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки вебхука: {e}")
+            return 'Error', 500
+    return 'Method not allowed', 405
 
-# ========== ИМПОРТЫ ОБРАБОТЧИКОВ ==========
-# Здесь импортируем твои существующие обработчики
-from bot.handlers import start, order, payment, referral, profile, admin
-from bot.database.db import init_db
-
-# ========== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ==========
-def register_handlers():
-    """Регистрация всех обработчиков команд"""
-    
-    # Базовые команды
-    telegram_app.add_handler(CommandHandler("start", start.start))
-    telegram_app.add_handler(CommandHandler("help", start.help_command))
-    
-    # Создание визитки
-    telegram_app.add_handler(CommandHandler("new", order.new_card))
-    telegram_app.add_handler(CallbackQueryHandler(order.handle_template_choice, pattern="^template_"))
-    telegram_app.add_handler(CallbackQueryHandler(order.handle_qr_type, pattern="^qr_type_"))
-    
-    # Профиль и статистика
-    telegram_app.add_handler(CommandHandler("profile", profile.show_profile))
-    telegram_app.add_handler(CommandHandler("stats", profile.show_stats))
-    
-    # Реферальная программа
-    telegram_app.add_handler(CommandHandler("referral", referral.show_referral))
-    telegram_app.add_handler(CommandHandler("balance", referral.show_balance))
-    
-    # Платежи
-    telegram_app.add_handler(CommandHandler("buy", payment.buy))
-    telegram_app.add_handler(PreCheckoutQueryHandler(payment.pre_checkout_handler))
-    telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, payment.successful_payment_handler))
-    
-    # Админка
-    telegram_app.add_handler(CommandHandler("admin", admin.admin_panel))
-    telegram_app.add_handler(CallbackQueryHandler(admin.handle_admin_callback, pattern="^admin_"))
-    
-    # Текстовые сообщения (для ввода артикулов и т.д.)
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, order.handle_text_input))
-    
-    logger.info("Обработчики зарегистрированы")
-
-# ========== FLASK ЭНДПОИНТЫ ==========
-@app.route("/health", methods=["GET"])
+@app.route('/health', methods=['GET'])
 def health():
-    """Проверка здоровья для Render"""
-    return "OK", 200
+    """Health check для Render"""
+    return 'OK', 200
 
-@app.route(WEBHOOK_PATH, methods=["POST"])
-def webhook():
-    """Приём обновлений от Telegram"""
-    try:
-        # Получаем обновление от Telegram
-        update_data = request.get_json(force=True)
-        update = Update.de_json(update_data, telegram_app.bot)
-        
-        # Отправляем в очередь обработки
-        telegram_app.update_queue.put(update)
-        
-        logger.debug(f"Получено обновление: {update.update_id}")
-        return "OK", 200
-    except Exception as e:
-        logger.error(f"Ошибка обработки вебхука: {e}")
-        return "Internal Server Error", 500
+@app.route('/', methods=['GET'])
+def index():
+    return 'Sylvia Bot is running!', 200
 
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    """Ручная установка вебхука (для отладки)"""
+# ========== Регистрация обработчиков ==========
+def register_handlers():
+    """Регистрирует все обработчики команд"""
     try:
-        bot = Bot(token=TOKEN)
-        bot.set_webhook(url=WEBHOOK_URL)
-        return f"Webhook установлен на {WEBHOOK_URL}", 200
+        # Импортируем обработчики
+        from bot.handlers.start import start_command
+        from bot.handlers.profile import profile_command
+        from bot.handlers.create_card import create_card_command
+        from bot.handlers.my_cards import my_cards_command
+        from bot.handlers.stats import stats_command
+        from bot.handlers.help import help_command
+        from bot.handlers.referral import referral_command
+        from bot.handlers.payment import payment_command, stars_handler
+        from bot.callback_handlers import callback_handler
+        
+        # Регистрируем команды
+        telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(CommandHandler("profile", profile_command))
+        telegram_app.add_handler(CommandHandler("create", create_card_command))
+        telegram_app.add_handler(CommandHandler("mycards", my_cards_command))
+        telegram_app.add_handler(CommandHandler("stats", stats_command))
+        telegram_app.add_handler(CommandHandler("help", help_command))
+        telegram_app.add_handler(CommandHandler("referral", referral_command))
+        telegram_app.add_handler(CommandHandler("payment", payment_command))
+        
+        # Регистрируем обработчик callback-запросов
+        telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+        
+        # Регистрируем обработчик платежей Stars
+        telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, stars_handler))
+        
+        logger.info("✅ Все обработчики успешно зарегистрированы")
+    except ImportError as e:
+        logger.error(f"❌ Ошибка импорта обработчиков: {e}")
+        raise e
+
+# ========== Настройка вебхука ==========
+async def setup_webhook():
+    """Устанавливает вебхук"""
+    try:
+        # Инициализируем приложение
+        await telegram_app.initialize()
+        
+        # Устанавливаем вебхук
+        await telegram_app.bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=['message', 'callback_query', 'successful_payment']
+        )
+        logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
+        
+        # Проверяем вебхук
+        webhook_info = await telegram_app.bot.get_webhook_info()
+        logger.info(f"ℹ️ Информация о вебхуке: {webhook_info}")
+        
+        # Сохраняем REDIRECT_URL в данных бота
+        telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
+        logger.info(f"ℹ️ REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
+        
     except Exception as e:
-        return f"Ошибка: {e}", 500
+        logger.error(f"❌ Ошибка установки вебхука: {e}")
+        raise e
 
 # ========== ЗАПУСК ==========
 def main():
     """Точка входа"""
-    logger.info("Запуск Sylvia Bot на Render...")
+    logger.info("🚀 Запуск Sylvia Bot на Render...")
     
-    # Инициализация БД
-    init_db()
-    logger.info("База данных инициализирована")
-    
-    # Регистрируем обработчики
-    register_handlers()
-    
-    # Сохраняем REDIRECT_URL в данных бота (для QR-кодов)
-    telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
-    
-    # Устанавливаем вебхук
     try:
-        telegram_app.bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"Вебхук установлен: {WEBHOOK_URL}")
+        # Регистрируем обработчики
+        register_handlers()
         
-        # Получаем информацию о вебхуке для проверки
-        webhook_info = telegram_app.bot.get_webhook_info()
-        logger.info(f"Информация о вебхуке: {webhook_info}")
+        # Создаем новый цикл событий
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Устанавливаем вебхук
+        loop.run_until_complete(setup_webhook())
+        
+        # Запускаем Flask
+        port = int(os.environ.get("PORT", 5000))
+        logger.info(f"🌐 Запуск Flask на порту {port}")
+        app.run(host="0.0.0.0", port=port, threaded=True)
+        
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен")
     except Exception as e:
-        logger.error(f"Ошибка установки вебхука: {e}")
-    
-    # Запускаем Flask приложение
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Запуск Flask на порту {port}")
-    app.run(host="0.0.0.0", port=port)
+        logger.error(f"❌ Критическая ошибка: {e}")
+        raise e
+    finally:
+        if 'loop' in locals():
+            loop.close()
 
 if __name__ == "__main__":
     main()
