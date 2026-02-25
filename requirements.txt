@@ -26,3 +26,5 @@ python-dotenv==1.0.0
 aiofiles==23.2.1
 schedule==1.2.0
 cryptography==41.0.7
+flask==3.0.0
+# остальные зависимости уже есть
