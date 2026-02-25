@@ -27,7 +27,7 @@ if not TOKEN:
 RENDER_URL = os.environ.get("RENDER_URL", "https://sylvia-shop-bot.onrender.com")
 WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
-# Инициализация бота (глобально)
+# Глобальный экземпляр бота
 telegram_app = None
 
 # ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
@@ -41,12 +41,16 @@ def init_bot():
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Принимает обновления от Telegram (синхронная обертка)"""
+    """Принимает обновления от Telegram"""
     if request.method == 'POST':
         try:
-            # Получаем JSON из запроса
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
+            
+            # Проверяем, что бот инициализирован
+            if telegram_app is None:
+                logger.error("❌ Бот не инициализирован!")
+                return 'Bot not initialized', 500
             
             # Создаем задачу для асинхронной обработки
             asyncio.run_coroutine_threadsafe(
@@ -89,7 +93,6 @@ def test():
 def register_handlers():
     """Регистрирует все обработчики команд"""
     try:
-        # Импортируем обработчики
         from bot.handlers.start import start_command
         from bot.handlers.profile import profile_command
         from bot.handlers.create_card import create_card_command
@@ -100,7 +103,6 @@ def register_handlers():
         from bot.handlers.payment import payment_command, stars_handler
         from bot.callback_handlers import callback_handler
         
-        # Регистрируем команды
         telegram_app.add_handler(CommandHandler("start", start_command))
         telegram_app.add_handler(CommandHandler("profile", profile_command))
         telegram_app.add_handler(CommandHandler("create", create_card_command))
@@ -109,11 +111,7 @@ def register_handlers():
         telegram_app.add_handler(CommandHandler("help", help_command))
         telegram_app.add_handler(CommandHandler("referral", referral_command))
         telegram_app.add_handler(CommandHandler("payment", payment_command))
-        
-        # Регистрируем обработчик callback-запросов
         telegram_app.add_handler(CallbackQueryHandler(callback_handler))
-        
-        # Регистрируем обработчик платежей Stars
         telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, stars_handler))
         
         logger.info("✅ Все обработчики успешно зарегистрированы")
@@ -125,11 +123,13 @@ def register_handlers():
 async def setup_webhook():
     """Устанавливает вебхук"""
     try:
-        # Удаляем старый вебхук
+        if telegram_app is None:
+            logger.error("❌ Бот не инициализирован перед установкой вебхука")
+            return
+            
         await telegram_app.bot.delete_webhook()
         logger.info("✅ Старый вебхук удален")
         
-        # Устанавливаем новый вебхук
         await telegram_app.bot.set_webhook(
             url=WEBHOOK_URL,
             allowed_updates=['message', 'callback_query', 'successful_payment'],
@@ -137,11 +137,9 @@ async def setup_webhook():
         )
         logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
         
-        # Проверяем вебхук
         webhook_info = await telegram_app.bot.get_webhook_info()
         logger.info(f"ℹ️ Информация о вебхуке: {webhook_info}")
         
-        # Сохраняем REDIRECT_URL в данных бота
         telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
         logger.info(f"ℹ️ REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
         
@@ -149,38 +147,37 @@ async def setup_webhook():
         logger.error(f"❌ Ошибка установки вебхука: {e}")
         raise e
 
-# ========== ЗАПУСК ==========
-def main():
-    """Точка входа"""
-    logger.info("🚀 Запуск Sylvia Bot на Render...")
+# ========== ФУНКЦИЯ ДЛЯ GUNICORN ==========
+def create_app():
+    """Функция, которую вызывает Gunicorn"""
+    global telegram_app
+    logger.info("🚀 Gunicorn вызывает create_app()")
     
-    try:
-        # Инициализируем бота
-        init_bot()
-        logger.info("✅ Бот инициализирован")
+    if telegram_app is None:
+        logger.info("🔄 Инициализация бота...")
+        telegram_app = init_bot()
         
-        # Создаем и запускаем цикл событий в отдельном потоке
+        # Запускаем вебхук в фоне
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        # Запускаем бота в фоне
         loop.run_until_complete(setup_webhook())
-        
-        # Запускаем Flask в основном потоке
-        port = int(os.environ.get("PORT", 5000))
-        logger.info(f"🌐 Запуск Flask на порту {port}")
-        
-        # Запускаем Flask с поддержкой асинхронности
-        app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-        
-    except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-        raise e
-    finally:
-        if 'loop' in locals():
-            loop.close()
+        logger.info("✅ Бот инициализирован и вебхук установлен")
+    
+    return app
+
+# ========== ЗАПУСК ==========
+def main():
+    """Точка входа для локального запуска"""
+    logger.info("🚀 Локальный запуск Sylvia Bot...")
+    create_app()
+    
+    # Запускаем Flask
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🌐 Запуск Flask на порту {port}")
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+
+# Это то, что Gunicorn будет использовать
+app = create_app()
 
 if __name__ == "__main__":
     main()
