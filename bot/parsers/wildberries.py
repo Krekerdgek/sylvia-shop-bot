@@ -250,7 +250,6 @@ class WBParser:
 
 ## Файл: `bot/parsers/ozon.py`
 
-
 # -*- coding: utf-8 -*-
 
 """
