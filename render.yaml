@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: sylvia-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m bot.main
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: REDIRECT_BASE_URL
+        value: https://sylvia-bot.onrender.com
+      - key: ADMIN_IDS
+        sync: false
