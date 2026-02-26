@@ -32,7 +32,8 @@ WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # Глобальные переменные
 telegram_app = None
-bot_ready = False  # 👈 Флаг готовности бота
+bot_ready = False
+bot_lock = threading.Lock()  # 👈 Блокировка для доступа к боту
 
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
@@ -43,15 +44,18 @@ def webhook():
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
             
-            if telegram_app is None or not bot_ready:
-                logger.error("❌ Бот ещё не готов!")
-                return 'Bot not ready', 503  # 👈 Возвращаем 503, Telegram повторит позже
-            
-            # Создаем новый event loop для каждого запроса
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(process_update_async(update_data))
-            loop.close()
+            with bot_lock:
+                if telegram_app is None or not bot_ready:
+                    logger.error("❌ Бот ещё не готов!")
+                    return 'Bot not ready', 503
+                
+                # 👈 ИСПОЛЬЗУЕМ ОДИН И ТОТ ЖЕ LOOP
+                # Не создаём новый loop, а используем тот, в котором живёт бот
+                future = asyncio.run_coroutine_threadsafe(
+                    process_update_async(update_data),
+                    asyncio.get_running_loop()  # 👈 loop из потока бота
+                )
+                future.result(timeout=30)  # Ждём результат
             
             return 'OK', 200
         except Exception as e:
@@ -79,9 +83,10 @@ async def process_update_async(update_data):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check с информацией о состоянии бота"""
-    if bot_ready:
-        return 'OK', 200
-    return 'Bot initializing', 503  # 👈 Render поймёт, что ещё не готов
+    with bot_lock:
+        if bot_ready:
+            return 'OK', 200
+    return 'Bot initializing', 503
 
 @app.route('/', methods=['GET'])
 def index():
@@ -137,54 +142,59 @@ def register_handlers():
         logger.info("✅ Все обработчики успешно зарегистрированы")
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
-        raise e  # 👈 Если ошибка - падаем, чтобы Render перезапустил
+        raise e
 
 # ========== Инициализация бота ==========
 async def init_bot_async():
     """Асинхронная инициализация бота"""
     global telegram_app, bot_ready
-    try:
-        telegram_app = Application.builder().token(TOKEN).build()
-        register_handlers()
-        await telegram_app.initialize()
-        
-        # Удаляем старый вебхук
-        await telegram_app.bot.delete_webhook()
-        logger.info("✅ Старый вебхук удален")
-        
-        # Устанавливаем новый
-        await telegram_app.bot.set_webhook(
-            url=WEBHOOK_URL,
-            allowed_updates=['message', 'callback_query', 'pre_checkout_query', 'successful_payment'],
-            max_connections=40
-        )
-        logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
-        
-        # Проверяем вебхук
-        webhook_info = await telegram_app.bot.get_webhook_info()
-        logger.info(f"ℹ️ Информация о вебхуке: {webhook_info}")
-        
-        telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
-        logger.info(f"ℹ️ REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
-        
-        bot_ready = True  # 👈 Всё готово!
-        logger.info("✅ Бот полностью инициализирован и готов к работе")
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка инициализации: {e}", exc_info=True)
-        bot_ready = False
-        raise e
+    
+    with bot_lock:
+        try:
+            telegram_app = Application.builder().token(TOKEN).build()
+            register_handlers()
+            await telegram_app.initialize()
+            
+            # Удаляем старый вебхук
+            await telegram_app.bot.delete_webhook()
+            logger.info("✅ Старый вебхук удален")
+            
+            # Устанавливаем новый
+            await telegram_app.bot.set_webhook(
+                url=WEBHOOK_URL,
+                allowed_updates=['message', 'callback_query', 'pre_checkout_query', 'successful_payment'],
+                max_connections=40
+            )
+            logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
+            
+            # Проверяем вебхук
+            webhook_info = await telegram_app.bot.get_webhook_info()
+            logger.info(f"ℹ️ Информация о вебхуке: {webhook_info}")
+            
+            telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
+            logger.info(f"ℹ️ REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
+            
+            bot_ready = True
+            logger.info("✅ Бот полностью инициализирован и готов к работе")
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка инициализации: {e}", exc_info=True)
+            bot_ready = False
+            raise e
 
-def init_bot_thread():
-    """Функция для потока инициализации бота"""
+def run_bot_forever():
+    """Запускает бота и держит loop живым"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         loop.run_until_complete(init_bot_async())
-        # Запускаем loop в фоне для обработки
+        logger.info("🔄 Запускаем вечный цикл обработки событий")
         loop.run_forever()
     except Exception as e:
-        logger.error(f"❌ Поток бота умер: {e}", exc_info=True)
+        logger.error(f"❌ Критическая ошибка в потоке бота: {e}", exc_info=True)
+    finally:
+        loop.close()
 
 # ========== Функция для Gunicorn ==========
 def create_app():
@@ -192,11 +202,21 @@ def create_app():
     logger.info("🚀 Gunicorn вызывает create_app()")
     
     # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=init_bot_thread, daemon=True)
+    bot_thread = threading.Thread(target=run_bot_forever, daemon=True)
     bot_thread.start()
     
     # Даём боту время на инициализацию
-    logger.info("⏳ Ожидаем инициализацию бота...")
+    timeout = 30
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        with bot_lock:
+            if bot_ready:
+                logger.info(f"✅ Бот готов через {time.time() - start_time:.1f} секунд")
+                break
+        time.sleep(0.5)
+    
+    if not bot_ready:
+        logger.warning(f"⚠️ Бот не готов после {timeout} секунд, но Flask стартует")
     
     return app
 
