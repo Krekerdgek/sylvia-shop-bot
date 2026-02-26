@@ -147,6 +147,7 @@ async def init_bot_and_webhook():
             logger.info("🔄 Фоновая инициализация бота...")
             telegram_app = Application.builder().token(TOKEN).build()
             register_handlers()
+           
             await telegram_app.initialize()
 
             await telegram_app.bot.delete_webhook()
