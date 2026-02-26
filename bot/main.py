@@ -46,12 +46,13 @@ def webhook():
                     logger.error("❌ Бот не инициализирован!")
                     return 'Bot not initialized', 503
 
-                # Используем loop из потока бота
-                future = asyncio.run_coroutine_threadsafe(
-                    process_update_async(update_data),
-                    asyncio.get_running_loop()
-                )
-                future.result(timeout=30)
+                                # Создаём новый loop для каждого запроса
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(process_update_async(update_data))
+                finally:
+                    loop.close()
 
             return 'OK', 200
         except Exception as e:
