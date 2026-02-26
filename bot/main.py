@@ -3,7 +3,7 @@ import logging
 import asyncio
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, filters
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
@@ -78,11 +78,18 @@ def register_handlers():
         # Импортируем обработчики из существующих файлов
         from bot.handlers.start import start, help_command
         from bot.handlers.profile import show_profile, show_stats, edit_shop
-        from bot.handlers.payment import payment_command, stars_handler
-        from bot.handlers.referral import referral_command
-        from bot.handlers.admin import admin_command  # если есть
-        from bot.handlers.order import order_command  # если есть
-        from bot.callback_handlers import callback_handler
+        from bot.handlers.order import (
+            new_card, handle_template_choice, show_qr_type_selection,
+            handle_qr_type, handle_text_input, handle_article_input,
+            handle_collection_input, handle_favorite_choice,
+            generate_card, back_to_templates
+        )
+        from bot.handlers.payment import (
+            buy, handle_payment, confirm_payment_handler,
+            pre_checkout_handler, successful_payment_handler
+        )
+        from bot.handlers.referral import show_referral, show_balance, handle_referral
+        from bot.handlers.admin import admin_panel, handle_admin_callback
         
         # Регистрируем команды
         telegram_app.add_handler(CommandHandler("start", start))
@@ -90,30 +97,51 @@ def register_handlers():
         telegram_app.add_handler(CommandHandler("profile", show_profile))
         telegram_app.add_handler(CommandHandler("stats", show_stats))
         telegram_app.add_handler(CommandHandler("edit_shop", edit_shop))
-        telegram_app.add_handler(CommandHandler("payment", payment_command))
-        telegram_app.add_handler(CommandHandler("referral", referral_command))
         
-        # Добавляем, если есть в файлах
-        try:
-            telegram_app.add_handler(CommandHandler("admin", admin_command))
-        except:
-            pass
-            
-        try:
-            telegram_app.add_handler(CommandHandler("order", order_command))
-        except:
-            pass
+        # Команды создания визиток
+        telegram_app.add_handler(CommandHandler("new", new_card))
+        telegram_app.add_handler(CommandHandler("create", new_card))  # алиас
         
-        # Регистрируем обработчик callback-запросов
-        telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+        # Платежи
+        telegram_app.add_handler(CommandHandler("buy", buy))
+        telegram_app.add_handler(CommandHandler("payment", buy))  # алиас
         
-        # Регистрируем обработчик платежей Stars
-        telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, stars_handler))
+        # Рефералы
+        telegram_app.add_handler(CommandHandler("referral", show_referral))
+        telegram_app.add_handler(CommandHandler("balance", show_balance))
+        
+        # Админка
+        telegram_app.add_handler(CommandHandler("admin", admin_panel))
+        
+        # Регистрируем обработчики текстовых сообщений (для ввода артикулов и т.д.)
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+        
+        # Регистрируем обработчики callback-запросов
+        # Специфичные для разных разделов
+        telegram_app.add_handler(CallbackQueryHandler(handle_template_choice, pattern="^template_"))
+        telegram_app.add_handler(CallbackQueryHandler(handle_qr_type, pattern="^qr_type_"))
+        telegram_app.add_handler(CallbackQueryHandler(handle_favorite_choice, pattern="^(save_favorite|continue_without_save)$"))
+        telegram_app.add_handler(CallbackQueryHandler(back_to_templates, pattern="^back_to_templates$"))
+        
+        # Платежные callback'и
+        telegram_app.add_handler(CallbackQueryHandler(handle_payment, pattern="^buy_template_"))
+        telegram_app.add_handler(CallbackQueryHandler(confirm_payment_handler, pattern="^(confirm|cancel)_payment$"))
+        
+        # Реферальные callback'и
+        telegram_app.add_handler(CallbackQueryHandler(handle_referral, pattern="^ref_"))
+        
+        # Админские callback'и
+        telegram_app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
+        
+        # Обработчики платежей
+        telegram_app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
+        telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
         
         logger.info("✅ Все обработчики успешно зарегистрированы")
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
-        raise e
+        # Не падаем, продолжаем работу с доступными обработчиками
+        logger.info("🔄 Продолжаем работу с частичной функциональностью")
 
 # ========== Инициализация бота ==========
 def init_bot():
@@ -136,7 +164,7 @@ async def setup_webhook():
         
         await telegram_app.bot.set_webhook(
             url=WEBHOOK_URL,
-            allowed_updates=['message', 'callback_query', 'successful_payment'],
+            allowed_updates=['message', 'callback_query', 'pre_checkout_query', 'successful_payment'],
             max_connections=40
         )
         logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
