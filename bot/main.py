@@ -29,7 +29,7 @@ WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # Глобальные переменные
 telegram_app = None
-bot_ready = False  # По умолчанию False, но мы сделаем его True сразу
+bot_ready = False
 bot_lock = threading.Lock()
 
 # ========== Flask Routes ==========
@@ -41,18 +41,19 @@ def webhook():
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
 
             with bot_lock:
-                # Проверяем, что бот существует, даже если ещё не до конца готов
                 if telegram_app is None:
                     logger.error("❌ Бот не инициализирован!")
                     return 'Bot not initialized', 503
 
-                                # Создаём новый loop для каждого запроса
+                # ✅ ФИНАЛЬНАЯ ВЕРСИЯ - создаём новый loop и НЕ закрываем его сразу
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(process_update_async(update_data))
-                finally:
-                    loop.close()
+                
+                # Запускаем обработку
+                loop.run_until_complete(process_update_async(update_data))
+                
+                # ❌ НЕ закрываем loop здесь! Он закроется сам
+                # loop.close() - УБРАНО!
 
             return 'OK', 200
         except Exception as e:
@@ -78,8 +79,6 @@ async def process_update_async(update_data):
 
 @app.route('/health', methods=['GET'])
 def health():
-    # Всегда возвращаем 200, как только Flask запустился
-    # Это самая важная строка для Render!
     return 'OK', 200
 
 @app.route('/', methods=['GET'])
@@ -88,9 +87,6 @@ def index():
 
 # ========== Регистрация обработчиков ==========
 def register_handlers():
-    # ... (весь ваш код регистрации handlers БЕЗ ИЗМЕНЕНИЙ) ...
-    # Он остаётся таким же, как в вашей последней версии.
-    # Убедитесь, что он здесь есть.
     try:
         from bot.handlers.start import start, help_command
         from bot.handlers.profile import show_profile, show_stats, edit_shop
@@ -139,9 +135,8 @@ def register_handlers():
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
         raise e
 
-# ========== Инициализация бота (теперь полностью фоновая) ==========
+# ========== Инициализация бота ==========
 async def init_bot_and_webhook():
-    """Полная фоновая инициализация бота и вебхука."""
     global telegram_app
     with bot_lock:
         try:
@@ -173,7 +168,6 @@ async def init_bot_and_webhook():
             logger.error(f"❌ Критическая ошибка фоновой инициализации: {e}", exc_info=True)
 
 def run_bot_background():
-    """Запускает фоновую инициализацию и держит loop живым."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -189,11 +183,9 @@ def run_bot_background():
 def create_app():
     logger.info("🚀 Gunicorn вызывает create_app()")
 
-    # Запускаем фоновую инициализацию в отдельном потоке
     bg_thread = threading.Thread(target=run_bot_background, daemon=True)
     bg_thread.start()
 
-    # НЕ ЖДЁМ инициализацию. Сразу возвращаем app.
     logger.info("✅ Flask готов к работе (фоновая инициализация бота продолжается)")
     return app
 
