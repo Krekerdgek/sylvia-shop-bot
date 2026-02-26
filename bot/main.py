@@ -11,7 +11,7 @@ load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
-    format='%(astime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     force=True
 )
@@ -44,7 +44,7 @@ def webhook():
                 logger.error("❌ Бот не инициализирован!")
                 return 'Bot not initialized', 500
             
-            # 👈 ПРОСТОЙ ВАРИАНТ - создаем новый event loop для каждого запроса
+            # Создаем новый event loop для каждого запроса
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(process_update_async(update_data))
@@ -67,6 +67,7 @@ async def process_update_async(update_data):
         elif update.callback_query:
             logger.info(f"🔘 Получен callback: '{update.callback_query.data}'")
         
+        # 👇 ВАЖНО: бот уже должен быть инициализирован
         await telegram_app.process_update(update)
         logger.info(f"✅ Обновление {update.update_id} успешно обработано")
         
@@ -136,12 +137,25 @@ def register_handlers():
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
 
 # ========== Инициализация бота ==========
-def init_bot():
-    """Создает и настраивает экземпляр бота"""
+async def init_bot_async():
+    """Асинхронная инициализация бота"""
     global telegram_app
     telegram_app = Application.builder().token(TOKEN).build()
     register_handlers()
+    
+    # 👇 ВАЖНО: явно инициализируем!
+    await telegram_app.initialize()
+    logger.info("✅ Бот инициализирован через initialize()")
+    
     return telegram_app
+
+def init_bot():
+    """Синхронная обертка для инициализации"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bot = loop.run_until_complete(init_bot_async())
+    loop.close()
+    return bot
 
 # ========== Настройка вебхука ==========
 async def setup_webhook():
@@ -181,11 +195,12 @@ def create_app():
     if telegram_app is None:
         logger.info("🔄 Инициализация бота...")
         
-        # Простой вариант - создаем loop только для установки вебхука
+        # 👇 Инициализируем с правильным вызовом initialize()
+        telegram_app = init_bot()
+        
+        # Устанавливаем вебхук
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        telegram_app = init_bot()
         loop.run_until_complete(setup_webhook())
         loop.close()
         
