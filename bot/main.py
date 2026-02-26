@@ -75,13 +75,13 @@ def index():
 def register_handlers():
     """Регистрирует все обработчики команд"""
     try:
-        # Импортируем обработчики с ПРАВИЛЬНЫМИ именами
+        # Импортируем обработчики из существующих файлов
         from bot.handlers.start import start, help_command
         from bot.handlers.profile import show_profile, show_stats, edit_shop
-        from bot.handlers.create_card import create_card_command
-        from bot.handlers.my_cards import my_cards_command
-        from bot.handlers.referral import referral_command
         from bot.handlers.payment import payment_command, stars_handler
+        from bot.handlers.referral import referral_command
+        from bot.handlers.admin import admin_command  # если есть
+        from bot.handlers.order import order_command  # если есть
         from bot.callback_handlers import callback_handler
         
         # Регистрируем команды
@@ -90,10 +90,19 @@ def register_handlers():
         telegram_app.add_handler(CommandHandler("profile", show_profile))
         telegram_app.add_handler(CommandHandler("stats", show_stats))
         telegram_app.add_handler(CommandHandler("edit_shop", edit_shop))
-        telegram_app.add_handler(CommandHandler("create", create_card_command))
-        telegram_app.add_handler(CommandHandler("mycards", my_cards_command))
-        telegram_app.add_handler(CommandHandler("referral", referral_command))
         telegram_app.add_handler(CommandHandler("payment", payment_command))
+        telegram_app.add_handler(CommandHandler("referral", referral_command))
+        
+        # Добавляем, если есть в файлах
+        try:
+            telegram_app.add_handler(CommandHandler("admin", admin_command))
+        except:
+            pass
+            
+        try:
+            telegram_app.add_handler(CommandHandler("order", order_command))
+        except:
+            pass
         
         # Регистрируем обработчик callback-запросов
         telegram_app.add_handler(CallbackQueryHandler(callback_handler))
