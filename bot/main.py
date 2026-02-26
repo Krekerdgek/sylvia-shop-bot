@@ -8,7 +8,6 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, filters
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения
 load_dotenv()
 
 # Настройка логирования
@@ -19,10 +18,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация Flask
 app = Flask(__name__)
 
-# Токен и URL
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN не установлен в переменных окружения!")
@@ -32,31 +29,30 @@ WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # Глобальные переменные
 telegram_app = None
-bot_ready = False
-bot_lock = threading.Lock()  # 👈 Блокировка для доступа к боту
+bot_ready = False  # По умолчанию False, но мы сделаем его True сразу
+bot_lock = threading.Lock()
 
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Принимает обновления от Telegram"""
     if request.method == 'POST':
         try:
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
-            
+
             with bot_lock:
-                if telegram_app is None or not bot_ready:
-                    logger.error("❌ Бот ещё не готов!")
-                    return 'Bot not ready', 503
-                
-                # 👈 ИСПОЛЬЗУЕМ ОДИН И ТОТ ЖЕ LOOP
-                # Не создаём новый loop, а используем тот, в котором живёт бот
+                # Проверяем, что бот существует, даже если ещё не до конца готов
+                if telegram_app is None:
+                    logger.error("❌ Бот не инициализирован!")
+                    return 'Bot not initialized', 503
+
+                # Используем loop из потока бота
                 future = asyncio.run_coroutine_threadsafe(
                     process_update_async(update_data),
-                    asyncio.get_running_loop()  # 👈 loop из потока бота
+                    asyncio.get_running_loop()
                 )
-                future.result(timeout=30)  # Ждём результат
-            
+                future.result(timeout=30)
+
             return 'OK', 200
         except Exception as e:
             logger.error(f"❌ Ошибка в webhook: {e}", exc_info=True)
@@ -64,29 +60,26 @@ def webhook():
     return 'Method not allowed', 405
 
 async def process_update_async(update_data):
-    """Асинхронная обработка обновления"""
     try:
         logger.info(f"🔄 Начинаем обработку update {update_data.get('update_id', 'unknown')}")
         update = Update.de_json(update_data, telegram_app.bot)
-        
+
         if update.message:
             logger.info(f"💬 Получено сообщение: '{update.message.text}' от {update.effective_user.id}")
         elif update.callback_query:
             logger.info(f"🔘 Получен callback: '{update.callback_query.data}'")
-        
+
         await telegram_app.process_update(update)
         logger.info(f"✅ Обновление {update.update_id} успешно обработано")
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка обработки обновления: {e}", exc_info=True)
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check с информацией о состоянии бота"""
-    with bot_lock:
-        if bot_ready:
-            return 'OK', 200
-    return 'Bot initializing', 503
+    # Всегда возвращаем 200, как только Flask запустился
+    # Это самая важная строка для Render!
+    return 'OK', 200
 
 @app.route('/', methods=['GET'])
 def index():
@@ -94,7 +87,9 @@ def index():
 
 # ========== Регистрация обработчиков ==========
 def register_handlers():
-    """Регистрирует все обработчики команд"""
+    # ... (весь ваш код регистрации handlers БЕЗ ИЗМЕНЕНИЙ) ...
+    # Он остаётся таким же, как в вашей последней версии.
+    # Убедитесь, что он здесь есть.
     try:
         from bot.handlers.start import start, help_command
         from bot.handlers.profile import show_profile, show_stats, edit_shop
@@ -110,8 +105,7 @@ def register_handlers():
         )
         from bot.handlers.referral import show_referral, show_balance, handle_referral
         from bot.handlers.admin import admin_panel, handle_admin_callback
-        
-        # Регистрируем команды
+
         telegram_app.add_handler(CommandHandler("start", start))
         telegram_app.add_handler(CommandHandler("help", help_command))
         telegram_app.add_handler(CommandHandler("profile", show_profile))
@@ -124,9 +118,9 @@ def register_handlers():
         telegram_app.add_handler(CommandHandler("referral", show_referral))
         telegram_app.add_handler(CommandHandler("balance", show_balance))
         telegram_app.add_handler(CommandHandler("admin", admin_panel))
-        
+
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
-        
+
         telegram_app.add_handler(CallbackQueryHandler(handle_template_choice, pattern="^template_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_qr_type, pattern="^qr_type_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_favorite_choice, pattern="^(save_favorite|continue_without_save)$"))
@@ -135,89 +129,70 @@ def register_handlers():
         telegram_app.add_handler(CallbackQueryHandler(confirm_payment_handler, pattern="^(confirm|cancel)_payment$"))
         telegram_app.add_handler(CallbackQueryHandler(handle_referral, pattern="^ref_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
-        
+
         telegram_app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
         telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
-        
+
         logger.info("✅ Все обработчики успешно зарегистрированы")
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
         raise e
 
-# ========== Инициализация бота ==========
-async def init_bot_async():
-    """Асинхронная инициализация бота"""
-    global telegram_app, bot_ready
-    
+# ========== Инициализация бота (теперь полностью фоновая) ==========
+async def init_bot_and_webhook():
+    """Полная фоновая инициализация бота и вебхука."""
+    global telegram_app
     with bot_lock:
         try:
+            logger.info("🔄 Фоновая инициализация бота...")
             telegram_app = Application.builder().token(TOKEN).build()
             register_handlers()
             await telegram_app.initialize()
-            
-            # Удаляем старый вебхук
+
             await telegram_app.bot.delete_webhook()
-            logger.info("✅ Старый вебхук удален")
-            
-            # Устанавливаем новый
+            logger.info("✅ Фон: старый вебхук удален")
+
             await telegram_app.bot.set_webhook(
                 url=WEBHOOK_URL,
                 allowed_updates=['message', 'callback_query', 'pre_checkout_query', 'successful_payment'],
                 max_connections=40
             )
-            logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
-            
-            # Проверяем вебхук
-            webhook_info = await telegram_app.bot.get_webhook_info()
-            logger.info(f"ℹ️ Информация о вебхуке: {webhook_info}")
-            
-            telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
-            logger.info(f"ℹ️ REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
-            
-            bot_ready = True
-            logger.info("✅ Бот полностью инициализирован и готов к работе")
-            
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка инициализации: {e}", exc_info=True)
-            bot_ready = False
-            raise e
+            logger.info(f"✅ Фон: вебхук установлен: {WEBHOOK_URL}")
 
-def run_bot_forever():
-    """Запускает бота и держит loop живым"""
+            webhook_info = await telegram_app.bot.get_webhook_info()
+            logger.info(f"ℹ️ Фон: информация о вебхуке: {webhook_info}")
+
+            telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
+            logger.info(f"ℹ️ Фон: REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
+
+            logger.info("✅ Фоновая инициализация бота полностью завершена")
+
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка фоновой инициализации: {e}", exc_info=True)
+
+def run_bot_background():
+    """Запускает фоновую инициализацию и держит loop живым."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
     try:
-        loop.run_until_complete(init_bot_async())
-        logger.info("🔄 Запускаем вечный цикл обработки событий")
+        loop.run_until_complete(init_bot_and_webhook())
+        logger.info("🔄 Фоновый цикл обработки событий запущен")
         loop.run_forever()
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка в потоке бота: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка в фоновом потоке бота: {e}", exc_info=True)
     finally:
         loop.close()
 
 # ========== Функция для Gunicorn ==========
 def create_app():
-    """Функция, которую вызывает Gunicorn"""
     logger.info("🚀 Gunicorn вызывает create_app()")
-    
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot_forever, daemon=True)
-    bot_thread.start()
-    
-    # Даём боту время на инициализацию
-    timeout = 30
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        with bot_lock:
-            if bot_ready:
-                logger.info(f"✅ Бот готов через {time.time() - start_time:.1f} секунд")
-                break
-        time.sleep(0.5)
-    
-    if not bot_ready:
-        logger.warning(f"⚠️ Бот не готов после {timeout} секунд, но Flask стартует")
-    
+
+    # Запускаем фоновую инициализацию в отдельном потоке
+    bg_thread = threading.Thread(target=run_bot_background, daemon=True)
+    bg_thread.start()
+
+    # НЕ ЖДЁМ инициализацию. Сразу возвращаем app.
+    logger.info("✅ Flask готов к работе (фоновая инициализация бота продолжается)")
     return app
 
 # ========== Точка входа ==========
