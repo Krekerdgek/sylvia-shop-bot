@@ -30,14 +30,6 @@ WEBHOOK_URL = f"{RENDER_URL}/webhook"
 # Глобальный экземпляр бота
 telegram_app = None
 
-# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
-def init_bot():
-    """Создает и настраивает экземпляр бота"""
-    global telegram_app
-    telegram_app = Application.builder().token(TOKEN).build()
-    register_handlers()
-    return telegram_app
-
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -47,12 +39,10 @@ def webhook():
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
             
-            # Проверяем, что бот инициализирован
             if telegram_app is None:
                 logger.error("❌ Бот не инициализирован!")
                 return 'Bot not initialized', 500
             
-            # Создаем задачу для асинхронной обработки
             asyncio.run_coroutine_threadsafe(
                 process_update_async(update_data),
                 asyncio.get_event_loop()
@@ -75,49 +65,54 @@ async def process_update_async(update_data):
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check для Render"""
     return 'OK', 200
 
 @app.route('/', methods=['GET'])
 def index():
     return 'Sylvia Bot is running!', 200
 
-@app.route('/test', methods=['GET', 'POST'])
-def test():
-    """Тестовый эндпоинт"""
-    if request.method == 'POST':
-        return f"POST received: {request.get_json()}", 200
-    return "GET received", 200
-
 # ========== Регистрация обработчиков ==========
 def register_handlers():
     """Регистрирует все обработчики команд"""
     try:
-        from bot.handlers.start import start  # ПРАВИЛЬНО!
-        from bot.handlers.profile import profile_command
+        # Импортируем обработчики с ПРАВИЛЬНЫМИ именами
+        from bot.handlers.start import start, help_command
+        from bot.handlers.profile import show_profile, show_stats, edit_shop
         from bot.handlers.create_card import create_card_command
         from bot.handlers.my_cards import my_cards_command
-        from bot.handlers.stats import stats_command
-        from bot.handlers.help import help_command
         from bot.handlers.referral import referral_command
         from bot.handlers.payment import payment_command, stars_handler
         from bot.callback_handlers import callback_handler
         
+        # Регистрируем команды
         telegram_app.add_handler(CommandHandler("start", start))
-        telegram_app.add_handler(CommandHandler("profile", profile_command))
+        telegram_app.add_handler(CommandHandler("help", help_command))
+        telegram_app.add_handler(CommandHandler("profile", show_profile))
+        telegram_app.add_handler(CommandHandler("stats", show_stats))
+        telegram_app.add_handler(CommandHandler("edit_shop", edit_shop))
         telegram_app.add_handler(CommandHandler("create", create_card_command))
         telegram_app.add_handler(CommandHandler("mycards", my_cards_command))
-        telegram_app.add_handler(CommandHandler("stats", stats_command))
-        telegram_app.add_handler(CommandHandler("help", help_command))
         telegram_app.add_handler(CommandHandler("referral", referral_command))
         telegram_app.add_handler(CommandHandler("payment", payment_command))
+        
+        # Регистрируем обработчик callback-запросов
         telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+        
+        # Регистрируем обработчик платежей Stars
         telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, stars_handler))
         
         logger.info("✅ Все обработчики успешно зарегистрированы")
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
         raise e
+
+# ========== Инициализация бота ==========
+def init_bot():
+    """Создает и настраивает экземпляр бота"""
+    global telegram_app
+    telegram_app = Application.builder().token(TOKEN).build()
+    register_handlers()
+    return telegram_app
 
 # ========== Настройка вебхука ==========
 async def setup_webhook():
@@ -147,7 +142,7 @@ async def setup_webhook():
         logger.error(f"❌ Ошибка установки вебхука: {e}")
         raise e
 
-# ========== ФУНКЦИЯ ДЛЯ GUNICORN ==========
+# ========== Функция для Gunicorn ==========
 def create_app():
     """Функция, которую вызывает Gunicorn"""
     global telegram_app
@@ -157,7 +152,6 @@ def create_app():
         logger.info("🔄 Инициализация бота...")
         telegram_app = init_bot()
         
-        # Запускаем вебхук в фоне
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(setup_webhook())
@@ -165,19 +159,10 @@ def create_app():
     
     return app
 
-# ========== ЗАПУСК ==========
-def main():
-    """Точка входа для локального запуска"""
-    logger.info("🚀 Локальный запуск Sylvia Bot...")
-    create_app()
-    
-    # Запускаем Flask
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🌐 Запуск Flask на порту {port}")
-    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-
-# Это то, что Gunicorn будет использовать
+# ========== Точка входа ==========
 app = create_app()
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🌐 Локальный запуск на порту {port}")
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
