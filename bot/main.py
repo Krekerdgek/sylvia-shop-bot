@@ -12,7 +12,8 @@ load_dotenv()
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,9 @@ if not TOKEN:
 RENDER_URL = os.environ.get("RENDER_URL", "https://sylvia-shop-bot.onrender.com")
 WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
-# Глобальный экземпляр бота
+# Глобальные переменные
 telegram_app = None
+bot_event_loop = None  # 👈 Сохраняем loop отдельно
 
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
@@ -39,13 +41,14 @@ def webhook():
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
             
-            if telegram_app is None:
+            if telegram_app is None or bot_event_loop is None:
                 logger.error("❌ Бот не инициализирован!")
                 return 'Bot not initialized', 500
             
+            # 👈 Используем сохраненный loop вместо asyncio.get_event_loop()
             asyncio.run_coroutine_threadsafe(
                 process_update_async(update_data),
-                asyncio.get_event_loop()
+                bot_event_loop
             )
             
             return 'OK', 200
@@ -57,9 +60,18 @@ def webhook():
 async def process_update_async(update_data):
     """Асинхронная обработка обновления"""
     try:
+        logger.info(f"🔄 Начинаем обработку update {update_data.get('update_id', 'unknown')}")
         update = Update.de_json(update_data, telegram_app.bot)
+        
+        # 👈 Проверяем, что пришло
+        if update.message:
+            logger.info(f"💬 Получено сообщение: '{update.message.text}' от {update.effective_user.id}")
+        elif update.callback_query:
+            logger.info(f"🔘 Получен callback: '{update.callback_query.data}'")
+        
         await telegram_app.process_update(update)
-        logger.info(f"✅ Обновление {update.update_id} обработано")
+        logger.info(f"✅ Обновление {update.update_id} успешно обработано")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка обработки обновления: {e}", exc_info=True)
 
@@ -75,7 +87,6 @@ def index():
 def register_handlers():
     """Регистрирует все обработчики команд"""
     try:
-        # Импортируем обработчики из существующих файлов
         from bot.handlers.start import start, help_command
         from bot.handlers.profile import show_profile, show_stats, edit_shop
         from bot.handlers.order import (
@@ -97,51 +108,34 @@ def register_handlers():
         telegram_app.add_handler(CommandHandler("profile", show_profile))
         telegram_app.add_handler(CommandHandler("stats", show_stats))
         telegram_app.add_handler(CommandHandler("edit_shop", edit_shop))
-        
-        # Команды создания визиток
         telegram_app.add_handler(CommandHandler("new", new_card))
-        telegram_app.add_handler(CommandHandler("create", new_card))  # алиас
-        
-        # Платежи
+        telegram_app.add_handler(CommandHandler("create", new_card))
         telegram_app.add_handler(CommandHandler("buy", buy))
-        telegram_app.add_handler(CommandHandler("payment", buy))  # алиас
-        
-        # Рефералы
+        telegram_app.add_handler(CommandHandler("payment", buy))
         telegram_app.add_handler(CommandHandler("referral", show_referral))
         telegram_app.add_handler(CommandHandler("balance", show_balance))
-        
-        # Админка
         telegram_app.add_handler(CommandHandler("admin", admin_panel))
         
-        # Регистрируем обработчики текстовых сообщений (для ввода артикулов и т.д.)
+        # Текстовые сообщения
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
         
-        # Регистрируем обработчики callback-запросов
-        # Специфичные для разных разделов
+        # Callback-обработчики
         telegram_app.add_handler(CallbackQueryHandler(handle_template_choice, pattern="^template_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_qr_type, pattern="^qr_type_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_favorite_choice, pattern="^(save_favorite|continue_without_save)$"))
         telegram_app.add_handler(CallbackQueryHandler(back_to_templates, pattern="^back_to_templates$"))
-        
-        # Платежные callback'и
         telegram_app.add_handler(CallbackQueryHandler(handle_payment, pattern="^buy_template_"))
         telegram_app.add_handler(CallbackQueryHandler(confirm_payment_handler, pattern="^(confirm|cancel)_payment$"))
-        
-        # Реферальные callback'и
         telegram_app.add_handler(CallbackQueryHandler(handle_referral, pattern="^ref_"))
-        
-        # Админские callback'и
         telegram_app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
         
-        # Обработчики платежей
+        # Платежи
         telegram_app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
         telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
         
         logger.info("✅ Все обработчики успешно зарегистрированы")
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
-        # Не падаем, продолжаем работу с доступными обработчиками
-        logger.info("🔄 Продолжаем работу с частичной функциональностью")
 
 # ========== Инициализация бота ==========
 def init_bot():
@@ -182,16 +176,28 @@ async def setup_webhook():
 # ========== Функция для Gunicorn ==========
 def create_app():
     """Функция, которую вызывает Gunicorn"""
-    global telegram_app
+    global telegram_app, bot_event_loop
+    
     logger.info("🚀 Gunicorn вызывает create_app()")
     
     if telegram_app is None:
         logger.info("🔄 Инициализация бота...")
-        telegram_app = init_bot()
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(setup_webhook())
+        # 👈 СОЗДАЕМ И СОХРАНЯЕМ LOOP
+        bot_event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(bot_event_loop)
+        
+        telegram_app = init_bot()
+        bot_event_loop.run_until_complete(setup_webhook())
+        
+        # 👈 Запускаем фоновую задачу для поддержания loop
+        def run_loop():
+            asyncio.set_event_loop(bot_event_loop)
+            bot_event_loop.run_forever()
+        
+        import threading
+        threading.Thread(target=run_loop, daemon=True).start()
+        
         logger.info("✅ Бот инициализирован и вебхук установлен")
     
     return app
