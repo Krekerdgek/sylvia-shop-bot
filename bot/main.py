@@ -1,6 +1,8 @@
 import os
 import logging
 import asyncio
+import threading
+import time
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, filters
@@ -30,6 +32,7 @@ WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # Глобальные переменные
 telegram_app = None
+bot_ready = False  # 👈 Флаг готовности бота
 
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
@@ -40,9 +43,9 @@ def webhook():
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
             
-            if telegram_app is None:
-                logger.error("❌ Бот не инициализирован!")
-                return 'Bot not initialized', 500
+            if telegram_app is None or not bot_ready:
+                logger.error("❌ Бот ещё не готов!")
+                return 'Bot not ready', 503  # 👈 Возвращаем 503, Telegram повторит позже
             
             # Создаем новый event loop для каждого запроса
             loop = asyncio.new_event_loop()
@@ -67,7 +70,6 @@ async def process_update_async(update_data):
         elif update.callback_query:
             logger.info(f"🔘 Получен callback: '{update.callback_query.data}'")
         
-        # 👇 ВАЖНО: бот уже должен быть инициализирован
         await telegram_app.process_update(update)
         logger.info(f"✅ Обновление {update.update_id} успешно обработано")
         
@@ -76,7 +78,10 @@ async def process_update_async(update_data):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return 'OK', 200
+    """Health check с информацией о состоянии бота"""
+    if bot_ready:
+        return 'OK', 200
+    return 'Bot initializing', 503  # 👈 Render поймёт, что ещё не готов
 
 @app.route('/', methods=['GET'])
 def index():
@@ -115,10 +120,8 @@ def register_handlers():
         telegram_app.add_handler(CommandHandler("balance", show_balance))
         telegram_app.add_handler(CommandHandler("admin", admin_panel))
         
-        # Текстовые сообщения
         telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
         
-        # Callback-обработчики
         telegram_app.add_handler(CallbackQueryHandler(handle_template_choice, pattern="^template_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_qr_type, pattern="^qr_type_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_favorite_choice, pattern="^(save_favorite|continue_without_save)$"))
@@ -128,46 +131,28 @@ def register_handlers():
         telegram_app.add_handler(CallbackQueryHandler(handle_referral, pattern="^ref_"))
         telegram_app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
         
-        # Платежи
         telegram_app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
         telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
         
         logger.info("✅ Все обработчики успешно зарегистрированы")
     except ImportError as e:
         logger.error(f"❌ Ошибка импорта обработчиков: {e}")
+        raise e  # 👈 Если ошибка - падаем, чтобы Render перезапустил
 
 # ========== Инициализация бота ==========
 async def init_bot_async():
     """Асинхронная инициализация бота"""
-    global telegram_app
-    telegram_app = Application.builder().token(TOKEN).build()
-    register_handlers()
-    
-    # 👇 ВАЖНО: явно инициализируем!
-    await telegram_app.initialize()
-    logger.info("✅ Бот инициализирован через initialize()")
-    
-    return telegram_app
-
-def init_bot():
-    """Синхронная обертка для инициализации"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot = loop.run_until_complete(init_bot_async())
-    loop.close()
-    return bot
-
-# ========== Настройка вебхука ==========
-async def setup_webhook():
-    """Устанавливает вебхук"""
+    global telegram_app, bot_ready
     try:
-        if telegram_app is None:
-            logger.error("❌ Бот не инициализирован перед установкой вебхука")
-            return
-            
+        telegram_app = Application.builder().token(TOKEN).build()
+        register_handlers()
+        await telegram_app.initialize()
+        
+        # Удаляем старый вебхук
         await telegram_app.bot.delete_webhook()
         logger.info("✅ Старый вебхук удален")
         
+        # Устанавливаем новый
         await telegram_app.bot.set_webhook(
             url=WEBHOOK_URL,
             allowed_updates=['message', 'callback_query', 'pre_checkout_query', 'successful_payment'],
@@ -175,36 +160,43 @@ async def setup_webhook():
         )
         logger.info(f"✅ Вебхук установлен: {WEBHOOK_URL}")
         
+        # Проверяем вебхук
         webhook_info = await telegram_app.bot.get_webhook_info()
         logger.info(f"ℹ️ Информация о вебхуке: {webhook_info}")
         
         telegram_app.bot_data['REDIRECT_URL'] = os.environ.get("REDIRECT_BASE_URL", RENDER_URL)
         logger.info(f"ℹ️ REDIRECT_URL установлен: {telegram_app.bot_data['REDIRECT_URL']}")
         
+        bot_ready = True  # 👈 Всё готово!
+        logger.info("✅ Бот полностью инициализирован и готов к работе")
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка установки вебхука: {e}")
+        logger.error(f"❌ Критическая ошибка инициализации: {e}", exc_info=True)
+        bot_ready = False
         raise e
+
+def init_bot_thread():
+    """Функция для потока инициализации бота"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_bot_async())
+        # Запускаем loop в фоне для обработки
+        loop.run_forever()
+    except Exception as e:
+        logger.error(f"❌ Поток бота умер: {e}", exc_info=True)
 
 # ========== Функция для Gunicorn ==========
 def create_app():
     """Функция, которую вызывает Gunicorn"""
-    global telegram_app
-    
     logger.info("🚀 Gunicorn вызывает create_app()")
     
-    if telegram_app is None:
-        logger.info("🔄 Инициализация бота...")
-        
-        # 👇 Инициализируем с правильным вызовом initialize()
-        telegram_app = init_bot()
-        
-        # Устанавливаем вебхук
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(setup_webhook())
-        loop.close()
-        
-        logger.info("✅ Бот инициализирован и вебхук установлен")
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=init_bot_thread, daemon=True)
+    bot_thread.start()
+    
+    # Даём боту время на инициализацию
+    logger.info("⏳ Ожидаем инициализацию бота...")
     
     return app
 
@@ -213,5 +205,5 @@ app = create_app()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🌐 Локальный запуск на порту {port}")
-    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+    logger.info(f"🌐 Запуск Flask на порту {port}")
+    app.run(host="0.0.0.0", port=port, threaded=True)
