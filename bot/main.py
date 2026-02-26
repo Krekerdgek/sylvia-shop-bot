@@ -93,7 +93,7 @@ def test():
 def register_handlers():
     """Регистрирует все обработчики команд"""
     try:
-        from bot.handlers.start import start_command
+        from bot.handlers.start import start  # ПРАВИЛЬНО!
         from bot.handlers.profile import profile_command
         from bot.handlers.create_card import create_card_command
         from bot.handlers.my_cards import my_cards_command
@@ -103,7 +103,7 @@ def register_handlers():
         from bot.handlers.payment import payment_command, stars_handler
         from bot.callback_handlers import callback_handler
         
-        telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(CommandHandler("start", start))
         telegram_app.add_handler(CommandHandler("profile", profile_command))
         telegram_app.add_handler(CommandHandler("create", create_card_command))
         telegram_app.add_handler(CommandHandler("mycards", my_cards_command))
