@@ -11,7 +11,7 @@ load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(astime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     force=True
 )
@@ -30,7 +30,6 @@ WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # Глобальные переменные
 telegram_app = None
-bot_event_loop = None  # 👈 Сохраняем loop отдельно
 
 # ========== Flask Routes ==========
 @app.route('/webhook', methods=['POST'])
@@ -41,15 +40,15 @@ def webhook():
             update_data = request.get_json(force=True)
             logger.info(f"📥 Получен webhook: {update_data.get('update_id', 'unknown')}")
             
-            if telegram_app is None or bot_event_loop is None:
+            if telegram_app is None:
                 logger.error("❌ Бот не инициализирован!")
                 return 'Bot not initialized', 500
             
-            # 👈 Используем сохраненный loop вместо asyncio.get_event_loop()
-            asyncio.run_coroutine_threadsafe(
-                process_update_async(update_data),
-                bot_event_loop
-            )
+            # 👈 ПРОСТОЙ ВАРИАНТ - создаем новый event loop для каждого запроса
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(process_update_async(update_data))
+            loop.close()
             
             return 'OK', 200
         except Exception as e:
@@ -63,7 +62,6 @@ async def process_update_async(update_data):
         logger.info(f"🔄 Начинаем обработку update {update_data.get('update_id', 'unknown')}")
         update = Update.de_json(update_data, telegram_app.bot)
         
-        # 👈 Проверяем, что пришло
         if update.message:
             logger.info(f"💬 Получено сообщение: '{update.message.text}' от {update.effective_user.id}")
         elif update.callback_query:
@@ -176,27 +174,20 @@ async def setup_webhook():
 # ========== Функция для Gunicorn ==========
 def create_app():
     """Функция, которую вызывает Gunicorn"""
-    global telegram_app, bot_event_loop
+    global telegram_app
     
     logger.info("🚀 Gunicorn вызывает create_app()")
     
     if telegram_app is None:
         logger.info("🔄 Инициализация бота...")
         
-        # 👈 СОЗДАЕМ И СОХРАНЯЕМ LOOP
-        bot_event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(bot_event_loop)
+        # Простой вариант - создаем loop только для установки вебхука
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
         telegram_app = init_bot()
-        bot_event_loop.run_until_complete(setup_webhook())
-        
-        # 👈 Запускаем фоновую задачу для поддержания loop
-        def run_loop():
-            asyncio.set_event_loop(bot_event_loop)
-            bot_event_loop.run_forever()
-        
-        import threading
-        threading.Thread(target=run_loop, daemon=True).start()
+        loop.run_until_complete(setup_webhook())
+        loop.close()
         
         logger.info("✅ Бот инициализирован и вебхук установлен")
     
